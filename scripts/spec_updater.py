@@ -6,11 +6,12 @@ not applied.
 
 Usage:
     python spec_updater.py --diff diff.patch --spec docs/architecture.md \
-        --impact impact_report.yaml --out spec_patch.diff
+        --impact impact_report.yaml --out spec_patch.diff [--branch my-pr-branch]
 """
 import argparse
 import re
 import anthropic
+from git_publish import commit_and_push
 from schema import ImpactReport
 
 SYSTEM_PROMPT = """You update ONE OR MORE numbered sections of an architecture spec
@@ -46,6 +47,8 @@ def main():
     p.add_argument("--spec", required=True)
     p.add_argument("--impact", required=True)
     p.add_argument("--out", required=True)
+    p.add_argument("--branch", default=None,
+                   help="PR head branch to push to; defaults to $GITHUB_HEAD_REF")
     args = p.parse_args()
 
     diff_text = open(args.diff).read()
@@ -83,10 +86,17 @@ def main():
     with open(args.spec, "w") as f:
         f.write(updated_spec)
 
-    # emit a diff for the PR comment / review
+    # emit a diff for the PR comment / review — must run before staging,
+    # since `git diff` without --cached goes empty once the file is added
     import subprocess
     subprocess.run(["git", "diff", "--", args.spec], stdout=open(args.out, "w"))
     print(f"Spec patch written, diff saved to {args.out}")
+
+    commit_and_push(
+        [args.spec],
+        "agent-loop: update spec sections affected by this change",
+        branch=args.branch,
+    )
 
 
 if __name__ == "__main__":

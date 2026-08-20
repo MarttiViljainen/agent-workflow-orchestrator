@@ -7,11 +7,12 @@ output tries to remove a test, the removal is dropped and flagged.
 
 Usage:
     python test_updater.py --diff diff.patch --impact impact_report.yaml \
-        --test-dir tests --out test_patch.diff
+        --test-dir tests --out test_patch.diff [--branch my-pr-branch]
 """
 import argparse
 import subprocess
 import anthropic
+from git_publish import commit_and_push
 from schema import ImpactReport
 
 SYSTEM_PROMPT = """You write or extend pytest test cases for a code change.
@@ -36,6 +37,8 @@ def main():
     p.add_argument("--impact", required=True)
     p.add_argument("--test-dir", required=True)
     p.add_argument("--out", required=True)
+    p.add_argument("--branch", default=None,
+                   help="PR head branch to push to; defaults to $GITHUB_HEAD_REF")
     args = p.parse_args()
 
     diff_text = open(args.diff).read()
@@ -66,8 +69,15 @@ def main():
             f.write(content)
         written.append(path)
 
+    # diff first — `git diff` without --cached goes empty once files are added
     subprocess.run(["git", "diff", "--"] + written, stdout=open(args.out, "w"))
     print(f"Test patch written for: {written}")
+
+    commit_and_push(
+        written,
+        "agent-loop: add/extend tests for this change",
+        branch=args.branch,
+    )
 
 
 if __name__ == "__main__":
