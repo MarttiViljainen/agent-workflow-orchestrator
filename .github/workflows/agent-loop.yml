@@ -1,0 +1,92 @@
+name: Agent Change Loop (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      spec_path:
+        required: true
+        type: string
+      test_command:
+        required: true
+        type: string
+      test_dir:
+        required: false
+        type: string
+        default: "tests"
+      diff_base:
+        required: true
+        type: string
+    secrets:
+      ANTHROPIC_API_KEY:
+        required: true
+
+jobs:
+  agent-loop:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Checkout orchestrator scripts
+        uses: actions/checkout@v4
+        with:
+          repository: MarttiViljainen/agent-workflow-orchestrator
+          path: .agent-orchestrator
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install deps
+        run: pip install anthropic pyyaml
+
+      - name: Generate diff
+        run: git diff ${{ inputs.diff_base }} -- . > diff.patch
+
+      - name: Impact analysis
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python .agent-orchestrator/scripts/impact_analysis.py --diff diff.patch --spec ${{ inputs.spec_path }} --out impact_report.yaml
+
+      - name: Spec update
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python .agent-orchestrator/scripts/spec_updater.py --diff diff.patch --spec ${{ inputs.spec_path }} --impact impact_report.yaml --out spec_patch.diff
+
+      - name: Test update
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python .agent-orchestrator/scripts/test_updater.py --diff diff.patch --impact impact_report.yaml --test-dir ${{ inputs.test_dir }} --out test_patch.diff
+
+      - name: Run tests
+        id: run_tests
+        continue-on-error: true
+        run: ${{ inputs.test_command }}
+
+      - name: Aggregate PR comment
+        if: always()
+        run: |
+          python .agent-orchestrator/scripts/aggregate_comment.py \
+            --impact impact_report.yaml --spec-diff spec_patch.diff \
+            --test-diff test_patch.diff \
+            --ci-result ${{ steps.run_tests.outcome == 'success' && 'pass' || 'fail' }} \
+            --out comment.md
+
+      - name: Post PR comment
+        if: always() && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const body = fs.readFileSync('comment.md', 'utf8');
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body,
+            });
+
+      - name: Fail job if CI failed
+        if: steps.run_tests.outcome != 'success'
+        run: exit 1

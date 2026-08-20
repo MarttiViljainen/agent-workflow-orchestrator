@@ -1,0 +1,28 @@
+# CLAUDE.md — agent guardrails for this repo
+
+## Change size
+- Keep PRs small and single-purpose. If a change touches more than ~200 lines
+  or more than 3 modules, split it, unless it's mechanical (rename, formatting).
+
+## Spec discipline
+- The architecture spec lives at `docs/architecture.md` and uses numbered,
+  anchored sections (see agent-workflow-orchestrator/docs/spec-convention.md).
+- Never rewrite the whole spec file. Only the agent loop patches named sections.
+
+## Tests
+- Never delete a test or weaken an assertion to make CI pass.
+- If a change makes an existing test's expectation wrong, add a new test
+  documenting the new expected behavior and leave a comment flagging the
+  conflict for human review — don't resolve it yourself.
+- New behavior needs a new test in the same PR, not a follow-up.
+
+## Commit / PR format
+- PR description must state: intent, risk tier (trivial/moderate/needs-deep-review),
+  and your own confidence + reasoning in one sentence.
+- Commit messages: imperative mood, one logical change per commit.
+
+## Things to never touch without asking first
+- (fill in per project — e.g. auth, billing, data migration scripts)
+
+## Review checklist
+See `review-checklist.md` — this is what the human checks before accepting.

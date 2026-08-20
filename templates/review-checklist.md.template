@@ -1,0 +1,16 @@
+# Human accept checklist
+
+Before approving an agent-authored PR, check:
+
+- [ ] Risk tier matches reality — re-read the diff if it's tagged "trivial" but
+      touches shared state, auth, or external calls.
+- [ ] Impact report's `open_questions` are resolved, not just acknowledged.
+- [ ] Spec diff reads correctly on its own — would a new team member understand
+      the change from the spec alone?
+- [ ] Test diff only adds/extends, never removes or weakens assertions.
+- [ ] CI passed on the actual updated tests (not stale/skipped ones).
+- [ ] No new dependency added without a reason stated in the PR description.
+- [ ] Nothing in "things to never touch" (CLAUDE.md) was touched.
+
+If risk_tier is `needs-deep-review`: read the full diff line by line, not just
+the aggregated comment.
