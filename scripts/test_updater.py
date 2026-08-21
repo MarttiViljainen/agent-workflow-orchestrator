@@ -10,10 +10,10 @@ Usage:
         --test-dir tests --out test_patch.diff [--branch my-pr-branch]
 """
 import argparse
-import os
 import subprocess
 import anthropic
 from git_publish import commit_and_push
+from safe_write import write_model_file
 from schema import ImpactReport
 
 SYSTEM_PROMPT = """You write or extend pytest test cases for a code change.
@@ -63,26 +63,11 @@ def main():
     raw = "".join(b.text for b in resp.content if b.type == "text")
 
     import re
-    test_dir = os.path.normpath(args.test_dir)
     written = []
     for block in re.finditer(r"===FILE (.+?)===\n(.*?)\n===END===", raw, re.DOTALL):
         path, content = block.group(1).strip(), block.group(2)
-
-        # Containment: whatever path the model guessed, the file lands inside
-        # --test-dir. normpath first, so "tests/../../.github/workflows/x.yml"
-        # can't satisfy a naive prefix check and escape the test directory.
-        path = os.path.normpath(path)
-        if not path.startswith(test_dir + os.sep):
-            redirected = os.path.join(test_dir, os.path.basename(path))
-            print(f"REDIRECTED: model proposed {path!r} outside --test-dir -> {redirected}")
-            path = redirected
-
-        parent = os.path.dirname(path)
-        if parent:
-            os.makedirs(parent, exist_ok=True)
-        with open(path, "w") as f:
-            f.write(content)
-        written.append(path)
+        # whatever path the model guessed, the file lands inside --test-dir
+        written.append(write_model_file(path, content, args.test_dir))
 
     # diff first — `git diff` without --cached goes empty once files are added
     subprocess.run(["git", "diff", "--"] + written, stdout=open(args.out, "w"))

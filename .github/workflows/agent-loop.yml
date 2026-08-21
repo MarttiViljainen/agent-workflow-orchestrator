@@ -16,6 +16,16 @@ on:
       diff_base:
         required: true
         type: string
+      max_fix_attempts:
+        description: "How many repair attempts after a failing test run."
+        required: false
+        type: number
+        default: 2
+      max_fix_tokens:
+        description: "Total token budget across ALL fix attempts combined, not per attempt."
+        required: false
+        type: number
+        default: 20000
     secrets:
       ANTHROPIC_API_KEY:
         required: true
@@ -69,7 +79,53 @@ jobs:
       - name: Run tests
         id: run_tests
         continue-on-error: true
-        run: ${{ inputs.test_command }}
+        run: |
+          set -o pipefail
+          ( ${{ inputs.test_command }} ) 2>&1 | tee pytest.log
+
+      # Actions has no native retry loop, so the bounded loop lives in bash.
+      # fix_failure.py owns all the state; the loop only branches on its exit
+      # code: 0 = fix written, non-zero = stop (2 budget, 3 no fix offered).
+      - name: Fix retry loop
+        id: fix_loop
+        if: steps.run_tests.outcome != 'success'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          FIX="python .agent-orchestrator/scripts/fix_failure.py --state fix_attempt_state.json"
+          RESULT=fail
+          attempt=0
+          while [ "$attempt" -lt "${{ inputs.max_fix_attempts }}" ]; do
+            attempt=$((attempt + 1))
+            echo "::group::fix attempt $attempt"
+            set +e
+            $FIX --failure-log pytest.log --diff diff.patch \
+                 --attempt "$attempt" \
+                 --max-attempts ${{ inputs.max_fix_attempts }} \
+                 --max-tokens ${{ inputs.max_fix_tokens }} \
+                 --base-dir . --branch "${{ github.head_ref }}"
+            rc=$?
+            set -e
+            if [ $rc -ne 0 ]; then
+              echo "fix loop stopping (fix_failure.py exit $rc)"
+              echo "::endgroup::"
+              break
+            fi
+            set +e
+            ( ${{ inputs.test_command }} ) > pytest.log 2>&1
+            test_rc=$?
+            set -e
+            tail -40 pytest.log
+            echo "::endgroup::"
+            if [ $test_rc -eq 0 ]; then
+              $FIX --record-test-result pass --branch "${{ github.head_ref }}"
+              RESULT=pass
+              break
+            fi
+            $FIX --record-test-result fail
+          done
+          $FIX --finalize
+          echo "result=$RESULT" >> "$GITHUB_OUTPUT"
 
       - name: Aggregate PR comment
         if: always()
@@ -77,7 +133,8 @@ jobs:
           python .agent-orchestrator/scripts/aggregate_comment.py \
             --impact impact_report.yaml --spec-diff spec_patch.diff \
             --test-diff test_patch.diff \
-            --ci-result ${{ steps.run_tests.outcome == 'success' && 'pass' || 'fail' }} \
+            --fix-log fix_attempt_state.json \
+            --ci-result ${{ (steps.run_tests.outcome == 'success' || steps.fix_loop.outputs.result == 'pass') && 'pass' || 'fail' }} \
             --out comment.md
 
       - name: Post PR comment
@@ -95,5 +152,5 @@ jobs:
             });
 
       - name: Fail job if CI failed
-        if: steps.run_tests.outcome != 'success'
+        if: steps.run_tests.outcome != 'success' && steps.fix_loop.outputs.result != 'pass'
         run: exit 1
