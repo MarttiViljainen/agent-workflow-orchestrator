@@ -42,8 +42,13 @@ EXIT_BUDGET_SPENT = 2
 EXIT_NO_FIX = 3
 
 MODEL = "claude-sonnet-4-6"
-MIN_OUTPUT_TOKENS = 512
+# Smallest reply worth paying for. If the remaining budget cannot cover the
+# input plus this much output, we stop rather than buy a truncated answer.
+MIN_USEFUL_OUTPUT_TOKENS = 512
 MAX_OUTPUT_TOKENS = 4000
+# chars-per-token for the fallback estimator; deliberately low (code tokenises
+# denser than prose) so the guess errs towards over-counting
+FALLBACK_CHARS_PER_TOKEN = 3
 
 SYSTEM_PROMPT = """You repair a failing test run. You are given the pytest failure
 output and the diff currently under review.
@@ -106,37 +111,71 @@ def summarise(raw):
     return (stripped[0][:200] if stripped else "(no summary given)")
 
 
+def estimate_input_tokens(client, system, messages):
+    """Cost of the prompt BEFORE sending it.
+
+    count_tokens is the real tokeniser and is not itself billed, so this is
+    exact in normal operation. The fallback only matters on an SDK too old to
+    expose it, and deliberately over-counts so a bad guess stops the loop
+    early rather than overspending.
+    """
+    try:
+        return client.messages.count_tokens(
+            model=MODEL, system=system, messages=messages
+        ).input_tokens
+    except Exception as exc:
+        text = system + "".join(m["content"] for m in messages)
+        approx = len(text) // FALLBACK_CHARS_PER_TOKEN
+        print(f"count_tokens unavailable ({type(exc).__name__}); estimating "
+              f"{approx} input tokens from {len(text)} chars")
+        return approx
+
+
 def propose_fix(args, state):
     """One repair attempt. Returns the process exit code."""
     used, budget = state["tokens_used"], args.max_tokens
+    remaining = budget - used
 
-    # budget gate — deliberately before the client call, so an exhausted
-    # budget costs nothing at all
-    if used >= budget:
+    if remaining <= 0:
         stop(state, args.state, "token-budget-exhausted",
              f"Token budget exhausted ({used}/{budget} used), stopping without "
              f"calling the API. Completed {len(state['attempts'])} attempt(s).")
         return EXIT_BUDGET_SPENT
 
-    # clamp this call so it cannot overshoot the ceiling by an unbounded amount
-    remaining = budget - used
-    max_output = max(MIN_OUTPUT_TOKENS, min(MAX_OUTPUT_TOKENS, remaining))
-
     failure_log = open(args.failure_log, encoding="utf-8", errors="replace").read()
     diff_text = open(args.diff, encoding="utf-8", errors="replace").read()
+    messages = [{
+        "role": "user",
+        "content": (
+            f"## Failing test output\n{failure_log}\n\n"
+            f"## Diff under review\n{diff_text}"
+        ),
+    }]
 
     client = anthropic.Anthropic()
+
+    # The prompt carries the whole failure log and diff and is re-sent in full
+    # on every attempt, so it usually dwarfs the reply. Budgeting on output
+    # alone is what let earlier runs sail past the cap — price the input first.
+    est_input = estimate_input_tokens(client, SYSTEM_PROMPT, messages)
+    affordable_output = remaining - est_input
+
+    # No MIN floor override here: if what's left cannot buy a useful reply,
+    # stop. Forcing a minimum-size call is precisely how the cap got breached.
+    if affordable_output < MIN_USEFUL_OUTPUT_TOKENS:
+        stop(state, args.state, "token-budget-exhausted",
+             f"Token budget exhausted: {used}/{budget} used, {remaining} left, "
+             f"but the next call needs ~{est_input} input + at least "
+             f"{MIN_USEFUL_OUTPUT_TOKENS} output tokens. Stopping without "
+             f"calling the API after {len(state['attempts'])} attempt(s).")
+        return EXIT_BUDGET_SPENT
+
+    max_output = min(MAX_OUTPUT_TOKENS, affordable_output)
     resp = client.messages.create(
         model=MODEL,
         max_tokens=max_output,
         system=SYSTEM_PROMPT,
-        messages=[{
-            "role": "user",
-            "content": (
-                f"## Failing test output\n{failure_log}\n\n"
-                f"## Diff under review\n{diff_text}"
-            ),
-        }],
+        messages=messages,
     )
     raw = "".join(b.text for b in resp.content if b.type == "text")
 
@@ -154,6 +193,7 @@ def propose_fix(args, state):
 
     state["attempts"].append({
         "attempt": args.attempt,
+        "estimated_input_tokens": est_input,
         "input_tokens": resp.usage.input_tokens,
         "output_tokens": resp.usage.output_tokens,
         "tokens_this_attempt": spent,
